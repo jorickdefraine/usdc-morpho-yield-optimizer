@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.3;
 
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/token/ERC20/IERC20.sol";
+import "@openzeppelin/access/Ownable.sol";
+import "@openzeppelin/security/ReentrancyGuard.sol";
+import "@openzeppelin/utils/math/Math.sol";
 
 /**
  * @title USDC Morpho Yield Optimizer Vault
@@ -13,7 +13,7 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
  * @dev Inherits from ERC4626 for standard tokenized vault functionality, Ownable for admin control,
  * and ReentrancyGuard for protection against reentrancy attacks.
  */
-contract Vault is ERC4626, Ownable, ReentrancyGuard {
+contract UMYOVault is ERC4626, Ownable, ReentrancyGuard {
     IERC4626 public morphoVault;
     
     /// @notice Emitted when the Morpho vault target is updated
@@ -51,9 +51,11 @@ contract Vault is ERC4626, Ownable, ReentrancyGuard {
      */
     constructor(IERC20 _asset) 
         ERC4626(_asset) 
-        ERC20("Vault USDC Morpho Yield Optimizer", "vUMYO")
-        Ownable(msg.sender)
-    {}
+        ERC20("USDC Morpho Yield Optimizer Vault", "vUMYO")
+        //Ownable(msg.sender)
+    {
+        _transferOwnership(msg.sender);
+    }
 
     /**
      * @notice Updates the target Morpho vault

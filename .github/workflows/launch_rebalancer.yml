@@ -1,0 +1,32 @@
+name: Launch Rebalancer
+on:
+  schedule:
+    # Runs at 00:00 UTC every day
+    - cron: '0 0 * * *'
+  # Allows you to manually trigger the workflow
+  workflow_dispatch:
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Load environment variables
+      run: |
+        echo "RPC_URL=${{ secrets.RPC_URL }}" >> .env
+        echo "UMYO_VAULT_ADDRESS=${{ secrets.UMYO_VAULT_ADDRESS }}" >> .env
+        echo "PRIVATE_KEY=${{ secrets.PRIVATE_KEY }}" >> .env
+
+    - name: Run optimization script
+      run: node scripts/rebalancer.js

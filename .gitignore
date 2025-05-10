@@ -1,1 +1,10 @@
 .venv
+.env
+broadcast/
+cache/
+lib/forge-std/
+lib/openzeppelin-contracts/
+lib/solmate
+out/
+foundry.toml
+.DS_Store
