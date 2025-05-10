@@ -4,7 +4,6 @@ const { JsonRpcProvider } = require('ethers/providers');
 const { ethers } = require('ethers');
 const axios = require('axios');
 const UMYOVaultABI = require('./UMYOVaultABI.json'); // Your contract ABI
-const AddressZero = "0x0000000000000000000000000000000000000000";
 
 const RPC_URL = process.env.RPC_URL;
 const UMYO_VAULT_ADDRESS = process.env.CONTRACT_ADDRESS;

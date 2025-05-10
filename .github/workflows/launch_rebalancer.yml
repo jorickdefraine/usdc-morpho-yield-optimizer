@@ -25,7 +25,7 @@ jobs:
     - name: Load environment variables
       run: |
         echo "RPC_URL=${{ secrets.RPC_URL }}" >> .env
-        echo "UMYO_VAULT_ADDRESS=${{ secrets.UMYO_VAULT_ADDRESS }}" >> .env
+        echo "CONTRACT_ADDRESS=${{ secrets.CONTRACT_ADDRESS }}" >> .env
         echo "PRIVATE_KEY=${{ secrets.PRIVATE_KEY }}" >> .env
 
     - name: Run optimization script
