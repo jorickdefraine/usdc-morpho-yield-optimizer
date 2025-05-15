@@ -80,7 +80,8 @@ async function optimizeVault() {
   const balance = await currentVault.maxWithdraw(vault);
   console.log(`balance:  ${balance}`);
 
-  const shares = await currentVault.maxRedeem(vault);
+  const currentVaultRedeem = new ethers.Contract(currentVaultAddress, ['function maxRedeem(address) view returns (uint256)'], provider);
+  const shares = await currentVaultRedeem.maxRedeem(vault);
   console.log(`shares:  ${shares}`);
 
   // Step 3: Compare and execute if better
