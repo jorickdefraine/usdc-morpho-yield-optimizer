@@ -80,6 +80,9 @@ async function optimizeVault() {
   const balance = await currentVault.maxWithdraw(vault);
   console.log(`balance:  ${balance}`);
 
+  const shares = await currentVault.previewRedeem(vault);
+  console.log(`shares:  ${shares}`);
+
   // Step 3: Compare and execute if better
   if (currentVaultAddress.toLowerCase() === bestVault.address.toLowerCase()) {
     console.log('Already using the highest yield vault. No action needed.');
@@ -89,7 +92,7 @@ async function optimizeVault() {
   console.log(`Migrating from ${currentVaultAddress} to ${bestVault.address}...`);
   // Step 4: Withdraw all from current vault
   console.log('Withdrawing from current vault...');
-  const tx1 = await vault.withdrawFromMorpho(balance);
+  const tx1 = await vault.withdrawFromMorpho(shares);
   await tx1.wait();
   console.log(`Withdrawal complete: ${tx1.hash}`);
 
