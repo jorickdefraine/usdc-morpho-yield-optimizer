@@ -80,7 +80,7 @@ async function optimizeVault() {
   const balance = await currentVault.maxWithdraw(vault);
   console.log(`balance:  ${balance}`);
 
-  const shares = await currentVault.previewRedeem(vault);
+  const shares = await currentVault.maxRedeem(vault);
   console.log(`shares:  ${shares}`);
 
   // Step 3: Compare and execute if better
