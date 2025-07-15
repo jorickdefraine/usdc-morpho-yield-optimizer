@@ -1,7 +1,7 @@
 import requests
 
 # GraphQL endpoint
-url = "https://blue-api.morpho.org/graphql"
+url = "https://api.morpho.org/graphql"
 
 # GraphQL query
 query = """
