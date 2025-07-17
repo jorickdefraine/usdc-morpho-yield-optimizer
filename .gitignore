@@ -1,10 +1,23 @@
+# Python/Poetry
 .venv
 .env
+
+# Foundry / Forge
 broadcast/
 cache/
-lib/forge-std/
-lib/openzeppelin-contracts/
-lib/solmate
 out/
 foundry.toml
+remappings.txt
+
+# Libraries (installed with forge install)
+lib/openzeppelin-contracts/
+lib/solmate/
+
+# Node.js
+node_modules/
+package-lock.json # ❓ Optional: ignore if you're not committing package-lock (not recommended)
+
+# OS & Editor files
 .DS_Store
+.idea/
+.vscode/

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.3;
 
-import "@openzeppelin/token/ERC20/extensions/ERC4626.sol";
-import "@openzeppelin/token/ERC20/IERC20.sol";
-import "@openzeppelin/access/Ownable.sol";
-import "@openzeppelin/security/ReentrancyGuard.sol";
-import "@openzeppelin/utils/math/Math.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title USDC Morpho Yield Optimizer Vault
@@ -52,7 +52,7 @@ contract UMYOVault is ERC4626, Ownable, ReentrancyGuard {
     constructor(IERC20 _asset) 
         ERC4626(_asset) 
         ERC20("USDC Morpho Yield Optimizer Vault", "vUMYO")
-        //Ownable(msg.sender)
+        Ownable(msg.sender)
     {
         _transferOwnership(msg.sender);
     }
