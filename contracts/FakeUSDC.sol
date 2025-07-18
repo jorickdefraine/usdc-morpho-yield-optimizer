@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.3;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/token/ERC20/ERC20.sol";
 
 contract FakeUSDC is ERC20 { 
     constructor() ERC20("USDCMorphoYieldOptimizer", "UMYO") {

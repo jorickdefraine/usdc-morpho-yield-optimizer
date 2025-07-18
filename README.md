@@ -5,7 +5,9 @@
 ### Build
 
 ```shell
-$ forge clean && forge build
+$ forge clean
+$ forge install OpenZeppelin/openzeppelin-contracts
+$ forge build
 ```
 
 ### Test

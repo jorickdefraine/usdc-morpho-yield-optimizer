@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.3;
 
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/token/ERC20/extensions/ERC4626.sol";
 
 contract FakeMorpho is ERC4626 {
     uint256 public exchangeRate = 1e18;

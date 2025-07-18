@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.3;
 
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/token/ERC20/IERC20.sol";
+import "@openzeppelin/access/Ownable.sol";
+import "@openzeppelin/utils/ReentrancyGuard.sol";
+import "@openzeppelin/utils/math/Math.sol";
 
 /**
  * @title USDC Morpho Yield Optimizer Vault
