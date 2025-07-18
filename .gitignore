@@ -1,6 +1,8 @@
 # Python/Poetry
 .venv
 .env
+.env.base
+.env.katana
 
 # Foundry / Forge
 broadcast/

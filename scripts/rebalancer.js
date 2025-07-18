@@ -5,6 +5,7 @@ const { ethers } = require('ethers');
 const axios = require('axios');
 const UMYOVaultABI = require('./UMYOVaultABI.json'); // Your contract ABI
 
+const CHAIN_ID = process.env.CHAIN_ID
 const RPC_URL = process.env.RPC_URL;
 const UMYO_VAULT_ADDRESS = process.env.CONTRACT_ADDRESS;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
@@ -13,7 +14,7 @@ const MORPHO_GRAPHQL_QUERY = `
   query {
     vaults(
       where: {
-        chainId_in: [8453],
+        chainId_in: [${CHAIN_ID}],
         whitelisted: true,
         assetSymbol_in: ["USDC"],
         totalAssetsUsd_gte: 1000000
@@ -34,7 +35,7 @@ const MORPHO_GRAPHQL_QUERY = `
 async function getHighestYieldVault() {
   try {
     const response = await axios.post(
-      'https://blue-api.morpho.org/graphql',
+      'https://api.morpho.org/graphql',
       { query: MORPHO_GRAPHQL_QUERY },
       { headers: { 'Content-Type': 'application/json' } }
     );
