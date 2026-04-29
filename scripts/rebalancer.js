@@ -1,117 +1,142 @@
-require('dotenv').config(); // Load environment variables from .env file
+require('dotenv').config();
 
-const { JsonRpcProvider } = require('ethers/providers');
 const { ethers } = require('ethers');
 const axios = require('axios');
-const UMYOVaultABI = require('./UMYOVaultABI.json'); // Your contract ABI
+const UMYOVaultABI = require('./UMYOVaultABI.json');
 
-const CHAIN_ID = process.env.CHAIN_ID
-const RPC_URL = process.env.RPC_URL;
-const UMYO_VAULT_ADDRESS = process.env.CONTRACT_ADDRESS;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+// ─── Configuration ─────────────────────────────────────────────────────────
 
-const MORPHO_GRAPHQL_QUERY = `
-  query {
-    vaults(
-      where: {
-        chainId_in: [${CHAIN_ID}],
-        whitelisted: true,
-        assetSymbol_in: ["USDC"],
-        totalAssetsUsd_gte: 1000000
-      }
-    ) {
-      items {
-        address
-        symbol
-        name
-        dailyApys {
-          netApy
+const CHAIN_ID              = parseInt(process.env.CHAIN_ID, 10);
+const RPC_URL               = process.env.RPC_URL;
+const VAULT_ADDRESS         = process.env.CONTRACT_ADDRESS;
+const PRIVATE_KEY           = process.env.PRIVATE_KEY;
+const MORPHO_API_URL        = 'https://api.morpho.org/graphql';
+
+// Only rebalance if the best vault offers at least this much more APY (absolute, e.g. 0.5 = 0.5%)
+const MIN_APY_IMPROVEMENT   = parseFloat(process.env.MIN_APY_IMPROVEMENT ?? '0.5');
+
+// Slippage tolerance on the recall step (basis points, e.g. 50 = 0.5%)
+const SLIPPAGE_BPS          = parseInt(process.env.SLIPPAGE_BPS ?? '50', 10);
+
+// ─── Morpho API ─────────────────────────────────────────────────────────────
+
+async function getVaultsSortedByApy() {
+  const query = `
+    query {
+      vaults(
+        where: {
+          chainId_in: [${CHAIN_ID}],
+          whitelisted: true,
+          assetSymbol_in: ["USDC"],
+          totalAssetsUsd_gte: 1000000
+        }
+      ) {
+        items {
+          address
+          symbol
+          name
+          dailyApys { netApy }
         }
       }
     }
-  }
-`;
+  `;
 
-async function getHighestYieldVault() {
-  try {
-    const response = await axios.post(
-      'https://api.morpho.org/graphql',
-      { query: MORPHO_GRAPHQL_QUERY },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
+  const { data } = await axios.post(
+    MORPHO_API_URL,
+    { query },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
 
-    const vaults = response.data.data.vaults.items;
-    const validVaults = vaults.filter(v => v.dailyApys?.netApy !== undefined);
+  const vaults = data.data.vaults.items.filter(
+    v => v.dailyApys?.netApy !== undefined && v.dailyApys.netApy !== null
+  );
 
-    if (validVaults.length === 0) {
-      throw new Error('No valid vaults found');
-    }
+  if (vaults.length === 0) throw new Error('No valid Morpho vaults found');
 
-    // Sort by APY descending
-    validVaults.sort((a, b) => b.dailyApys.netApy - a.dailyApys.netApy);
-
-    return {
-      address: validVaults[0].address,
-      apy: validVaults[0].dailyApys.netApy,
-      name: validVaults[0].name
-    };
-  } catch (error) {
-    console.error('Error fetching vaults:', error);
-    throw error;
-  }
+  return vaults.sort((a, b) => b.dailyApys.netApy - a.dailyApys.netApy);
 }
 
+// ─── Current vault APY ───────────────────────────────────────────────────────
+
+async function getCurrentVaultApy(currentVaultAddress, allVaults) {
+  const match = allVaults.find(
+    v => v.address.toLowerCase() === currentVaultAddress.toLowerCase()
+  );
+  return match ? match.dailyApys.netApy : null;
+}
+
+// ─── Main ────────────────────────────────────────────────────────────────────
+
 async function optimizeVault() {
-  // Setup provider and signer
-  const provider = new JsonRpcProvider(RPC_URL);
-  const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const signer   = new ethers.Wallet(PRIVATE_KEY, provider);
+  const vault    = new ethers.Contract(VAULT_ADDRESS, UMYOVaultABI, signer);
 
-  // Connect to your vault contract
-  const vault = new ethers.Contract(UMYO_VAULT_ADDRESS, UMYOVaultABI, signer);
-
-  // Step 1: Get current vault info
+  // ── Step 1: current state ──────────────────────────────────────────────────
   const currentVaultAddress = await vault.morphoVault();
-  console.log(`Current Morpho vault: ${currentVaultAddress}`);
+  const isVaultSet = currentVaultAddress !== ethers.ZeroAddress;
+  console.log(`Vault:         ${VAULT_ADDRESS}`);
+  console.log(`Current Morpho: ${isVaultSet ? currentVaultAddress : '(none)'}`);
 
-  // Step 2: Find highest yield vault
-  const bestVault = await getHighestYieldVault();
-  console.log(`Highest yield vault: ${bestVault.address} (APY: ${bestVault.apy}%)`);
-  
-  const currentVault = new ethers.Contract(currentVaultAddress, ['function maxWithdraw(address) view returns (uint256)'], provider);
-  const balance = await currentVault.maxWithdraw(vault);
-  console.log(`balance:  ${balance}`);
+  // ── Step 2: find best available vault ─────────────────────────────────────
+  const sortedVaults = await getVaultsSortedByApy();
+  const bestVault    = sortedVaults[0];
+  console.log(`Best vault:    ${bestVault.address} — ${bestVault.name}`);
+  console.log(`Best APY:      ${(bestVault.dailyApys.netApy * 100).toFixed(2)}%`);
 
-  const currentVaultRedeem = new ethers.Contract(currentVaultAddress, ['function maxRedeem(address) view returns (uint256)'], provider);
-  const shares = await currentVaultRedeem.maxRedeem(vault);
-  console.log(`shares:  ${shares}`);
-
-  // Step 3: Compare and execute if better
-  if (currentVaultAddress.toLowerCase() === bestVault.address.toLowerCase()) {
-    console.log('Already using the highest yield vault. No action needed.');
+  // ── Step 3: check if improvement justifies rebalance ──────────────────────
+  if (isVaultSet && currentVaultAddress.toLowerCase() === bestVault.address.toLowerCase()) {
+    console.log('Already using the best vault. No action needed.');
     return;
   }
 
-  console.log(`Migrating from ${currentVaultAddress} to ${bestVault.address}...`);
-  // Step 4: Withdraw all from current vault
-  console.log('Withdrawing from current vault...');
-  const tx1 = await vault.withdrawFromMorpho(shares);
-  await tx1.wait();
-  console.log(`Withdrawal complete: ${tx1.hash}`);
+  if (isVaultSet) {
+    const currentApy = await getCurrentVaultApy(currentVaultAddress, sortedVaults);
+    if (currentApy !== null) {
+      const improvement = (bestVault.dailyApys.netApy - currentApy) * 100;
+      console.log(`Current APY:   ${(currentApy * 100).toFixed(2)}%`);
+      console.log(`APY delta:     +${improvement.toFixed(2)}%`);
+      if (improvement < MIN_APY_IMPROVEMENT) {
+        console.log(`Improvement (${improvement.toFixed(2)}%) below threshold (${MIN_APY_IMPROVEMENT}%). Skipping.`);
+        return;
+      }
+    }
+  }
 
-  // Step 5: Update to new vault
-  console.log('Updating to new vault...');
-  const tx2 = await vault.setMorphoVault(bestVault.address);
-  await tx2.wait();
-  console.log(`Vault updated: ${tx2.hash}`);
+  // ── Step 4: compute slippage floor ────────────────────────────────────────
+  let minAssetsReceived = 0n;
+  if (isVaultSet) {
+    const currentMorpho = new ethers.Contract(
+      currentVaultAddress,
+      ['function maxWithdraw(address) view returns (uint256)'],
+      provider
+    );
+    const maxWithdraw = await currentMorpho.maxWithdraw(VAULT_ADDRESS);
+    // Accept up to SLIPPAGE_BPS basis points of slippage on the recall
+    minAssetsReceived = maxWithdraw * BigInt(10_000 - SLIPPAGE_BPS) / 10_000n;
+    console.log(`Max withdraw:  ${ethers.formatUnits(maxWithdraw, 6)} USDC`);
+    console.log(`Min accepted:  ${ethers.formatUnits(minAssetsReceived, 6)} USDC`);
+  }
 
-  // Step 6: Deploy to new vault
-  console.log('Deploying to new vault...');
-  const tx3 = await vault.deployToMorpho();
-  await tx3.wait();
-  console.log(`Deployment complete: ${tx3.hash}`);
+  // ── Step 5: rebalance (single atomic transaction) ─────────────────────────
+  console.log(`\nRebalancing → ${bestVault.name} (${bestVault.address})...`);
+  const tx = await vault.rebalance(bestVault.address, minAssetsReceived);
+  const receipt = await tx.wait();
+  console.log(`Done. tx: ${receipt.hash}`);
 
-  console.log('Migration successfully completed!');
+  // Extract Rebalanced event for logging
+  const rebalancedEvent = receipt.logs
+    .map(log => { try { return vault.interface.parseLog(log); } catch { return null; } })
+    .find(e => e?.name === 'Rebalanced');
+
+  if (rebalancedEvent) {
+    const { assetsWithdrawn, assetsDeployed } = rebalancedEvent.args;
+    console.log(`Withdrawn:     ${ethers.formatUnits(assetsWithdrawn, 6)} USDC`);
+    console.log(`Deployed:      ${ethers.formatUnits(assetsDeployed, 6)} USDC`);
+  }
 }
 
-// Run the optimizer
-optimizeVault().catch(console.error);
+optimizeVault().catch(err => {
+  console.error('Rebalancer error:', err.message ?? err);
+  process.exit(1);
+});

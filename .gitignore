@@ -8,8 +8,6 @@
 broadcast/
 cache/
 out/
-foundry.toml
-remappings.txt
 
 # Libraries (installed with forge install)
 lib/openzeppelin-contracts/

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-pragma solidity ^0.8.3;
-
-import "@openzeppelin/token/ERC20/ERC20.sol";
+import {ERC20} from "@openzeppelin/token/ERC20/ERC20.sol";
 
 contract FakeUSDC is ERC20 { 
     constructor() ERC20("USD Coin", "USDC") {
