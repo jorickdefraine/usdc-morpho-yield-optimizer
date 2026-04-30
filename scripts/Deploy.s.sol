@@ -30,6 +30,7 @@ contract Deploy is Script {
         vm.startBroadcast(deployerKey);
 
         UMYOVault vault = new UMYOVault(IERC20(usdc), vaultOwner);
+        vault.approveVault(morphoVault);
         vault.setMorphoVault(IERC4626(morphoVault));
         vault.setRebalancer(rebalancer);
 
