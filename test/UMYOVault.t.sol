@@ -343,14 +343,11 @@ contract UMYOVaultTest is Test, IUMYOVaultEvents {
         vm.prank(keeper);
         vault.rebalance(address(morpho2), 0, 0);
 
-        // Immediately try again (morpho1 is now approved and != current)
+        // Pre-read before arming prank: calling vault.lastRebalanceTime() inside
+        // abi.encodeWithSelector() is a CALL opcode that would consume vm.prank.
+        uint256 nextAllowed = vault.lastRebalanceTime() + 1 hours;
         vm.prank(keeper);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                UMYOVault.RebalanceCooldownActive.selector,
-                vault.lastRebalanceTime() + 1 hours
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(UMYOVault.RebalanceCooldownActive.selector, nextAllowed));
         vault.rebalance(address(morpho1), 0, 0);
     }
 

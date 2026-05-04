@@ -6,7 +6,7 @@ import {ERC20} from "@openzeppelin/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/interfaces/IERC4626.sol";
 import {SafeERC20} from "@openzeppelin/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/access/Ownable.sol";
+import {Ownable2Step, Ownable} from "@openzeppelin/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/utils/math/Math.sol";
@@ -28,6 +28,8 @@ import {Math} from "@openzeppelin/utils/math/Math.sol";
  *   - Roles are strictly separated: owner configures, rebalancer executes. An attacker
  *     must compromise BOTH keys to drain funds via rebalance (owner approves target,
  *     rebalancer deploys). Use a timelocked multisig as owner in production.
+ *   - Ownable2Step: ownership transfers require the new owner to call acceptOwnership(),
+ *     preventing permanent loss of admin control from a mistyped transferOwnership() call.
  *   - nonReentrant on all state-changing paths (user-facing and admin).
  *   - SafeERC20.forceApprove for exact-amount approvals (handles USDC's non-standard
  *     approve behavior that requires zeroing before setting a new value).
@@ -47,7 +49,7 @@ import {Math} from "@openzeppelin/utils/math/Math.sol";
  *   - rebalanceCooldown limits how frequently the rebalancer can migrate funds,
  *     capping gas-griefing and repeated-slippage attacks from a compromised key.
  */
-contract UMYOVault is ERC4626, Ownable, ReentrancyGuard, Pausable {
+contract UMYOVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // =========================================================================
@@ -260,16 +262,14 @@ contract UMYOVault is ERC4626, Ownable, ReentrancyGuard, Pausable {
     /**
      * @notice Atomically migrate all assets to a better-yielding Morpho vault.
      *
-     * Execution order:
-     *   1. Enforce rebalance cooldown (if set)
-     *   2. Recall all from old vault (if any shares held)
-     *   3. Switch morphoVault pointer to newVault
-     *   4. Deploy all local assets to newVault
-     *   5. Record timestamp for next cooldown check
+     * Execution order (strict CEI — all state updates before external calls):
+     *   1. Checks: cooldown, zero address, same vault, whitelist, asset match
+     *   2. Effects: update morphoVault pointer, previousMorphoVault, lastRebalanceTime
+     *   3. Interactions: recall from old vault, deploy to new vault
      *
      * @param newVault          Target Morpho vault. Must be in approvedVaults.
-     * @param minAssetsReceived Slippage floor on the recall step (step 2).
-     * @param minSharesOut      Minimum Morpho shares to receive on the deploy step (step 4).
+     * @param minAssetsReceived Slippage floor on the recall step.
+     * @param minSharesOut      Minimum Morpho shares to receive on the deploy step.
      *                          Guards against sandwich attacks on the new vault's share price.
      *                          Pass 0 to skip (e.g. when migrating from a vault with no position).
      */
@@ -278,6 +278,7 @@ contract UMYOVault is ERC4626, Ownable, ReentrancyGuard, Pausable {
         onlyRebalancer
         nonReentrant
     {
+        // ── Checks ───────────────────────────────────────────────────────────
         uint256 cooldown = rebalanceCooldown;
         if (cooldown > 0 && lastRebalanceTime > 0 && block.timestamp < lastRebalanceTime + cooldown) {
             revert RebalanceCooldownActive(lastRebalanceTime + cooldown);
@@ -289,8 +290,15 @@ contract UMYOVault is ERC4626, Ownable, ReentrancyGuard, Pausable {
         if (IERC4626(newVault).asset() != asset()) revert AssetMismatch();
 
         address oldVault = address(morphoVault);
-        uint256 assetsRecalled;
 
+        // ── Effects (all state updates before any external call) ─────────────
+        previousMorphoVault = oldVault;
+        morphoVault = IERC4626(newVault);
+        lastRebalanceTime = block.timestamp;
+        emit MorphoVaultUpdated(oldVault, newVault);
+
+        // ── Interactions ──────────────────────────────────────────────────────
+        uint256 assetsRecalled;
         if (oldVault != address(0)) {
             uint256 shares = IERC4626(oldVault).balanceOf(address(this));
             if (shares > 0) {
@@ -302,10 +310,6 @@ contract UMYOVault is ERC4626, Ownable, ReentrancyGuard, Pausable {
             }
         }
 
-        previousMorphoVault = oldVault;
-        morphoVault = IERC4626(newVault);
-        emit MorphoVaultUpdated(oldVault, newVault);
-
         uint256 localAssets = IERC20(asset()).balanceOf(address(this));
         uint256 assetsDeployed;
         if (localAssets > 0) {
@@ -316,7 +320,6 @@ contract UMYOVault is ERC4626, Ownable, ReentrancyGuard, Pausable {
             assetsDeployed = localAssets;
         }
 
-        lastRebalanceTime = block.timestamp;
         emit Rebalanced(oldVault, newVault, assetsRecalled, assetsDeployed, block.timestamp);
     }
 
