@@ -11,43 +11,26 @@ import {Pausable} from "@openzeppelin/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/utils/math/Math.sol";
 
+interface IRewardsDistributor {
+    function claim(address account, address reward, uint256 claimable, bytes32[] calldata proof) external;
+}
+
 /**
  * @title UMYOVault
- * @notice ERC4626 vault that routes USDC to the highest-yielding Morpho market.
+ * @notice ERC4626 vault that routes USDC to the highest-yielding Morpho vault.
  *
- * Strategy: single active Morpho vault at a time. All assets are deployed to one
- * target. Rebalancing is atomic — withdraw from old, switch target, deposit into new.
+ * Roles:
+ *   - Owner  : manage vault whitelist, set keeper, emergency actions, pause
+ *   - Keeper : call rebalance() — also callable by owner for emergency migrations
  *
- * Access model:
- *   - Owner: vault configuration (approveVault, setRebalancer, setMorphoVault, pause,
- *     setRebalanceCooldown, sweepRewards). Cannot move funds directly.
- *   - Rebalancer: fund-moving operations (deployToMorpho, rebalance, recallFromMorpho).
- *     Kept separate from owner so neither key alone can drain depositor funds.
- *
- * Security notes:
- *   - Roles are strictly separated: owner configures, rebalancer executes. An attacker
- *     must compromise BOTH keys to drain funds via rebalance (owner approves target,
- *     rebalancer deploys). Use a timelocked multisig as owner in production.
- *   - Ownable2Step: ownership transfers require the new owner to call acceptOwnership(),
- *     preventing permanent loss of admin control from a mistyped transferOwnership() call.
- *   - nonReentrant on all state-changing paths (user-facing and admin).
- *   - SafeERC20.forceApprove for exact-amount approvals (handles USDC's non-standard
- *     approve behavior that requires zeroing before setting a new value).
- *   - No infinite approvals: each deposit call sets the exact approval needed.
- *   - redeem() is overridden alongside withdraw() so BOTH paths trigger Morpho recall.
- *   - approvedVaults whitelist restricts both rebalance() targets and setMorphoVault()
- *     targets, preventing fund routing to unapproved contracts.
- *   - sweepRewards() guards against sweeping the underlying asset, the active Morpho
- *     vault shares, AND the previous Morpho vault shares (post-rebalance residuals).
- *   - setMorphoVault() reverts if funds are currently deployed, preventing permanent
- *     stranding of assets in the old vault.
- *   - _decimalsOffset = 6 raises virtual-share inflation-attack cost to ~1M× victim
- *     deposit for USDC's 6-decimal precision (OZ default of 0 only costs 2×).
- *   - _ensureLocalLiquidity pulls deficit+1 wei when headroom exists to absorb
- *     1-wei ERC4626 rounding from the Morpho vault's share-burn math, preventing
- *     a rare revert when a user redeems exactly 100% of available liquidity.
- *   - rebalanceCooldown limits how frequently the rebalancer can migrate funds,
- *     capping gas-griefing and repeated-slippage attacks from a compromised key.
+ * Security:
+ *   - Vault whitelist prevents a compromised keeper from routing to arbitrary contracts
+ *   - nonReentrant on all state-changing paths
+ *   - Ownable2Step prevents accidental ownership loss
+ *   - _decimalsOffset = 6 raises inflation-attack cost to ~10^6x on USDC
+ *   - maxDeposit/maxMint return 0 when paused (EIP-4626 s4.4)
+ *   - Strict CEI in rebalance(): state updated before all external calls
+ *   - forceApprove handles USDC's non-standard approve return value
  */
 contract UMYOVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
@@ -56,70 +39,41 @@ contract UMYOVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     // State
     // =========================================================================
 
+    string public constant VERSION = "1.2.0";
+
     IERC4626 public morphoVault;
-    /// @notice Previous Morpho vault, retained to block sweeping residual shares.
-    address public previousMorphoVault;
-    address public rebalancer;
+    address  public immutable keeper;
 
-    /// @notice Vaults eligible as rebalance targets and setMorphoVault targets. Owner-controlled.
-    mapping(address => bool) public approvedVaults;
-
-    /// @notice Minimum seconds between successive rebalance() calls. 0 = no limit.
-    uint256 public rebalanceCooldown;
-    /// @notice Timestamp of the most recent successful rebalance().
-    uint256 public lastRebalanceTime;
+    /// @notice Morpho vaults approved as rebalance targets. Owner-managed.
+    mapping(address => bool) public allowedVaults;
 
     // =========================================================================
     // Events
     // =========================================================================
 
-    event MorphoVaultUpdated(address indexed oldVault, address indexed newVault);
-    event Rebalanced(
-        address indexed oldVault,
-        address indexed newVault,
-        uint256 assetsWithdrawn,
-        uint256 assetsDeployed,
-        uint256 timestamp
-    );
-    event AssetsDeployed(address indexed vault, uint256 assets);
+    event Rebalanced(address indexed fromVault, address indexed toVault, uint256 assetsDeployed);
+    event VaultAllowanceChanged(address indexed vault, bool allowed);
     event AssetsRecalled(address indexed vault, uint256 assets);
-    event RebalancerUpdated(address indexed oldRebalancer, address indexed newRebalancer);
+    event AssetsDeployed(address indexed vault, uint256 assets);
     event RewardSwept(address indexed token, address indexed to, uint256 amount);
-    event VaultApprovalChanged(address indexed vault, bool approved);
-    event RebalanceCooldownUpdated(uint256 oldCooldown, uint256 newCooldown);
 
     // =========================================================================
     // Errors
     // =========================================================================
 
     error ZeroAddress();
-    error VaultNotSet();
-    error SameVault();
-    error SlippageExceeded(uint256 received, uint256 minimum);
-    error InsufficientLiquidity(uint256 requested, uint256 available);
     error Unauthorized();
-    error CannotSweepUnderlying();
-    error VaultNotApproved();
-    error VaultHasDeployedFunds();
+    error VaultNotAllowed();
     error AssetMismatch();
-    error RebalanceCooldownActive(uint256 nextAllowed);
+    error InsufficientLiquidity(uint256 requested, uint256 available);
+    error CannotSweepUnderlying();
 
     // =========================================================================
-    // Modifiers
+    // Modifier
     // =========================================================================
 
-    /// @dev Only the designated rebalancer. Owner is intentionally excluded to
-    ///      enforce role separation: owner configures, rebalancer executes. This
-    ///      means draining funds requires compromising BOTH keys.
-    modifier onlyRebalancer() {
-        if (msg.sender != rebalancer) revert Unauthorized();
-        _;
-    }
-
-    /// @dev Emergency operations (recall) are open to both owner and rebalancer
-    ///      so a fast-moving keeper can act without waiting for multisig quorum.
-    modifier onlyOwnerOrRebalancer() {
-        if (msg.sender != owner() && msg.sender != rebalancer) revert Unauthorized();
+    modifier onlyKeeperOrOwner() {
+        if (msg.sender != keeper && msg.sender != owner()) revert Unauthorized();
         _;
     }
 
@@ -127,239 +81,158 @@ contract UMYOVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     // Constructor
     // =========================================================================
 
-    constructor(IERC20 _asset, address _owner)
+    /**
+     * @param _asset   Underlying token (USDC on Base).
+     * @param _owner   Initial owner — should be a multisig.
+     * @param _keeper  Keeper EOA authorised to call rebalance().
+     */
+    constructor(IERC20 _asset, address _owner, address _keeper)
         ERC4626(_asset)
         ERC20("USDC Morpho Yield Optimizer", "vUMYO")
         Ownable(_owner)
-    {}
+    {
+        if (_keeper == address(0)) revert ZeroAddress();
+        keeper = _keeper;
+    }
 
     // =========================================================================
-    // Admin
+    // Owner — configuration
     // =========================================================================
 
+    /// @notice Add or remove a Morpho vault from the approved targets.
+    function allowVault(address vault_, bool allowed) external onlyOwner {
+        if (vault_ == address(0)) revert ZeroAddress();
+        allowedVaults[vault_] = allowed;
+        emit VaultAllowanceChanged(vault_, allowed);
+    }
+
+    function pause()   external onlyOwner { _pause(); }
+    function unpause() external onlyOwner { _unpause(); }
+
     /**
-     * @notice Whitelist a vault as a valid target for rebalance() and setMorphoVault().
-     * @dev Must be called before either function can use a new vault address.
-     *      The underlying asset is verified inside rebalance() and setMorphoVault();
-     *      this function is intentionally kept lightweight to support pre-approval workflows.
+     * @notice Pull ALL funds from the active Morpho vault back to idle.
+     * @dev Use during Morpho incidents. Does not pause — call pause() separately if needed.
+     *      Callable even when paused so the owner can always retrieve funds.
      */
-    function approveVault(address vault) external onlyOwner {
-        if (vault == address(0)) revert ZeroAddress();
-        approvedVaults[vault] = true;
-        emit VaultApprovalChanged(vault, true);
-    }
-
-    /// @notice Remove a vault from the whitelist.
-    function revokeVault(address vault) external onlyOwner {
-        approvedVaults[vault] = false;
-        emit VaultApprovalChanged(vault, false);
-    }
-
-    /// @notice Halt new deposits and mints. Does not affect withdrawals.
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    /// @notice Resume normal operation.
-    function unpause() external onlyOwner {
-        _unpause();
+    function emergencyWithdraw() external onlyOwner nonReentrant {
+        IERC4626 vault_ = morphoVault;
+        if (address(vault_) == address(0)) return;
+        uint256 shares = vault_.balanceOf(address(this));
+        if (shares == 0) return;
+        uint256 assets = vault_.redeem(shares, address(this), address(this));
+        emit AssetsRecalled(address(vault_), assets);
     }
 
     /**
-     * @notice Set the active Morpho vault without moving funds.
-     * @dev Use only for initial configuration when no funds are deployed.
-     *      The vault must already be in the approvedVaults whitelist.
-     *      Reverts if funds are currently in the old vault — use rebalance() instead.
+     * @notice Claim rewards from a Morpho Universal Rewards Distributor.
+     * @dev The vault holds Morpho vault shares in its own name, so it is the eligible
+     *      claimant — not individual depositors. After claiming, call sweepRewards()
+     *      to forward the tokens to the owner.
      */
-    function setMorphoVault(IERC4626 vault) external onlyOwner {
-        if (address(vault) == address(0)) revert ZeroAddress();
-        if (address(vault) == address(morphoVault)) revert SameVault();
-        if (!approvedVaults[address(vault)]) revert VaultNotApproved();
-        if (vault.asset() != asset()) revert AssetMismatch();
-        // Prevent silently stranding deployed funds in the old vault.
-        if (address(morphoVault) != address(0) && morphoVault.balanceOf(address(this)) > 0) {
-            revert VaultHasDeployedFunds();
-        }
-        address old = address(morphoVault);
-        previousMorphoVault = old;
-        morphoVault = vault;
-        emit MorphoVaultUpdated(old, address(vault));
+    function claimRewards(
+        address distributor,
+        address rewardToken,
+        uint256 claimable,
+        bytes32[] calldata proof
+    ) external onlyOwner {
+        if (distributor == address(0)) revert ZeroAddress();
+        IRewardsDistributor(distributor).claim(address(this), rewardToken, claimable, proof);
     }
 
     /**
-     * @notice Assign the keeper that can trigger rebalances and deployments.
-     */
-    function setRebalancer(address _rebalancer) external onlyOwner {
-        if (_rebalancer == address(0)) revert ZeroAddress();
-        address old = rebalancer;
-        rebalancer = _rebalancer;
-        emit RebalancerUpdated(old, _rebalancer);
-    }
-
-    /**
-     * @notice Set the minimum time (in seconds) between successive rebalance() calls.
-     * @dev Set to 0 to disable the cooldown. Limits gas-griefing from a compromised
-     *      rebalancer key making rapid rebalances to incur repeated slippage.
-     */
-    function setRebalanceCooldown(uint256 cooldown) external onlyOwner {
-        uint256 old = rebalanceCooldown;
-        rebalanceCooldown = cooldown;
-        emit RebalanceCooldownUpdated(old, cooldown);
-    }
-
-    /**
-     * @notice Sweep any non-underlying token (e.g. MORPHO rewards) to the owner.
-     * @dev Reverts if token is:
-     *      - the vault's underlying asset
-     *      - the active Morpho vault's share token
-     *      - the previous Morpho vault's share token (guards residual shares post-rebalance)
+     * @notice Sweep ERC20 reward tokens (e.g. MORPHO incentives) to the owner.
+     * @dev Reverts for the underlying asset or active vault shares.
      */
     function sweepRewards(address token) external onlyOwner {
-        if (token == asset()) revert CannotSweepUnderlying();
-        if (token == address(morphoVault)) revert CannotSweepUnderlying();
-        if (token == previousMorphoVault) revert CannotSweepUnderlying();
+        if (token == asset() || token == address(morphoVault)) revert CannotSweepUnderlying();
         uint256 amount = IERC20(token).balanceOf(address(this));
         if (amount == 0) return;
         IERC20(token).safeTransfer(owner(), amount);
         emit RewardSwept(token, owner(), amount);
     }
 
-    /**
-     * @notice Emergency: pull all capital from Morpho back to this contract.
-     * @dev Callable by both owner and rebalancer so a fast keeper can act without
-     *      waiting for multisig quorum during an active Morpho incident.
-     *      Leaves assets idle. Use deployToMorpho() or rebalance() to redeploy.
-     */
-    function recallFromMorpho() external onlyOwnerOrRebalancer nonReentrant {
-        IERC4626 _morpho = morphoVault;
-        if (address(_morpho) == address(0)) revert VaultNotSet();
-        uint256 shares = _morpho.balanceOf(address(this));
-        if (shares == 0) return;
-        uint256 assets = _morpho.redeem(shares, address(this), address(this));
-        emit AssetsRecalled(address(_morpho), assets);
-    }
-
     // =========================================================================
-    // Strategy Management
+    // Keeper — rebalance
     // =========================================================================
 
     /**
-     * @notice Deploy all idle assets in this contract to the active Morpho vault.
-     * @param minSharesOut Minimum Morpho shares to receive. Guards against sandwich
-     *                     attacks on the deploy step. Pass 0 to skip (e.g. testing).
-     */
-    function deployToMorpho(uint256 minSharesOut) external onlyRebalancer nonReentrant {
-        IERC4626 _morpho = morphoVault;
-        if (address(_morpho) == address(0)) revert VaultNotSet();
-        uint256 assets = IERC20(asset()).balanceOf(address(this));
-        if (assets == 0) return;
-        uint256 sharesBefore = _morpho.balanceOf(address(this));
-        _deployToMorpho(_morpho, assets);
-        uint256 sharesReceived = _morpho.balanceOf(address(this)) - sharesBefore;
-        if (sharesReceived < minSharesOut) revert SlippageExceeded(sharesReceived, minSharesOut);
-    }
-
-    /**
-     * @notice Atomically migrate all assets to a better-yielding Morpho vault.
+     * @notice Migrate all funds to newVault, or redeploy idle USDC to the current vault.
      *
-     * Execution order (strict CEI — all state updates before external calls):
-     *   1. Checks: cooldown, zero address, same vault, whitelist, asset match
-     *   2. Effects: update morphoVault pointer, previousMorphoVault, lastRebalanceTime
-     *   3. Interactions: recall from old vault, deploy to new vault
+     * Steps (strict CEI):
+     *   1. Validate: whitelist, asset match
+     *   2. Effects  : update morphoVault
+     *   3. Interactions:
+     *        a. Recall ALL shares from old vault (skipped if same-vault call)
+     *        b. Deploy ALL idle USDC to new vault
      *
-     * @param newVault          Target Morpho vault. Must be in approvedVaults.
-     * @param minAssetsReceived Slippage floor on the recall step.
-     * @param minSharesOut      Minimum Morpho shares to receive on the deploy step.
-     *                          Guards against sandwich attacks on the new vault's share price.
-     *                          Pass 0 to skip (e.g. when migrating from a vault with no position).
+     * Passing the current vault address re-deploys any new idle USDC without migrating.
+     * This is how the keeper deploys fresh deposits between vault changes.
+     *
+     * @param newVault Must be in allowedVaults and share the same underlying asset.
      */
-    function rebalance(address newVault, uint256 minAssetsReceived, uint256 minSharesOut)
-        external
-        onlyRebalancer
-        nonReentrant
-    {
-        // ── Checks ───────────────────────────────────────────────────────────
-        uint256 cooldown = rebalanceCooldown;
-        if (cooldown > 0 && lastRebalanceTime > 0 && block.timestamp < lastRebalanceTime + cooldown) {
-            revert RebalanceCooldownActive(lastRebalanceTime + cooldown);
-        }
-
+    function rebalance(address newVault) external onlyKeeperOrOwner nonReentrant whenNotPaused {
         if (newVault == address(0)) revert ZeroAddress();
-        if (newVault == address(morphoVault)) revert SameVault();
-        if (!approvedVaults[newVault]) revert VaultNotApproved();
+        if (!allowedVaults[newVault]) revert VaultNotAllowed();
         if (IERC4626(newVault).asset() != asset()) revert AssetMismatch();
 
         address oldVault = address(morphoVault);
 
-        // ── Effects (all state updates before any external call) ─────────────
-        previousMorphoVault = oldVault;
+        // ── Effects ─────────────────────────────────────────────────────────
         morphoVault = IERC4626(newVault);
-        lastRebalanceTime = block.timestamp;
-        emit MorphoVaultUpdated(oldVault, newVault);
 
-        // ── Interactions ──────────────────────────────────────────────────────
-        uint256 assetsRecalled;
-        if (oldVault != address(0)) {
+        // ── Interactions ─────────────────────────────────────────────────────
+        // Recall from old vault only when migrating to a different vault.
+        if (oldVault != address(0) && oldVault != newVault) {
             uint256 shares = IERC4626(oldVault).balanceOf(address(this));
             if (shares > 0) {
-                assetsRecalled = IERC4626(oldVault).redeem(shares, address(this), address(this));
-                if (assetsRecalled < minAssetsReceived) {
-                    revert SlippageExceeded(assetsRecalled, minAssetsReceived);
-                }
-                emit AssetsRecalled(oldVault, assetsRecalled);
+                uint256 recalled = IERC4626(oldVault).redeem(shares, address(this), address(this));
+                emit AssetsRecalled(oldVault, recalled);
             }
         }
 
-        uint256 localAssets = IERC20(asset()).balanceOf(address(this));
-        uint256 assetsDeployed;
-        if (localAssets > 0) {
-            uint256 sharesBefore = IERC4626(newVault).balanceOf(address(this));
-            _deployToMorpho(IERC4626(newVault), localAssets);
-            uint256 sharesReceived = IERC4626(newVault).balanceOf(address(this)) - sharesBefore;
-            if (sharesReceived < minSharesOut) revert SlippageExceeded(sharesReceived, minSharesOut);
-            assetsDeployed = localAssets;
+        // Deploy all idle USDC to the (possibly new) vault.
+        uint256 idle = IERC20(asset()).balanceOf(address(this));
+        if (idle > 0) {
+            IERC20(asset()).forceApprove(newVault, idle);
+            IERC4626(newVault).deposit(idle, address(this));
+            emit AssetsDeployed(newVault, idle);
         }
 
-        emit Rebalanced(oldVault, newVault, assetsRecalled, assetsDeployed, block.timestamp);
+        emit Rebalanced(oldVault, newVault, idle);
     }
 
     // =========================================================================
     // ERC4626 Overrides
     // =========================================================================
 
-    /**
-     * @dev Raises virtual-share count to 10^6, matching USDC's own decimal precision.
-     *      With the default offset of 0, an inflation attack on a 6-decimal asset
-     *      only costs ~2× the victim's deposit. With offset 6, cost is ~10^6×.
-     */
-    function _decimalsOffset() internal pure override returns (uint8) {
-        return 6;
+    /// @dev Offset of 6 matches USDC's decimals, raising the inflation-attack cost to ~10^6x.
+    function _decimalsOffset() internal pure override returns (uint8) { return 6; }
+
+    /// @notice EIP-4626 s4.4: MUST return 0 when deposits are not permitted.
+    function maxDeposit(address receiver) public view override returns (uint256) {
+        return paused() ? 0 : super.maxDeposit(receiver);
     }
 
-    /**
-     * @notice Total assets: idle balance + value of deployed Morpho position.
-     */
+    function maxMint(address receiver) public view override returns (uint256) {
+        return paused() ? 0 : super.maxMint(receiver);
+    }
+
+    /// @notice Idle USDC + fair value of the Morpho vault position.
     function totalAssets() public view override returns (uint256) {
-        uint256 idle = IERC20(asset()).balanceOf(address(this));
-        IERC4626 _morpho = morphoVault;
-        uint256 deployed = address(_morpho) != address(0)
-            ? _morpho.convertToAssets(_morpho.balanceOf(address(this)))
+        IERC4626 vault_ = morphoVault;
+        uint256 deployed = address(vault_) != address(0)
+            ? vault_.convertToAssets(vault_.balanceOf(address(this)))
             : 0;
-        return idle + deployed;
+        return IERC20(asset()).balanceOf(address(this)) + deployed;
     }
 
-    /**
-     * @notice EIP-4626: max assets owner can withdraw right now, capped by liquidity.
-     */
-    function maxWithdraw(address owner) public view override returns (uint256) {
-        return Math.min(convertToAssets(balanceOf(owner)), _availableLiquidity());
+    /// @notice Capped by currently withdrawable liquidity from Morpho.
+    function maxWithdraw(address _owner) public view override returns (uint256) {
+        return Math.min(convertToAssets(balanceOf(_owner)), _availableLiquidity());
     }
 
-    /**
-     * @notice EIP-4626: max shares owner can redeem right now, capped by liquidity.
-     */
-    function maxRedeem(address owner) public view override returns (uint256) {
-        uint256 userShares = balanceOf(owner);
+    function maxRedeem(address _owner) public view override returns (uint256) {
+        uint256 userShares = balanceOf(_owner);
         uint256 userAssets = convertToAssets(userShares);
         uint256 liquidity  = _availableLiquidity();
         if (liquidity >= userAssets) return userShares;
@@ -367,93 +240,59 @@ contract UMYOVault is ERC4626, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function deposit(uint256 assets, address receiver)
-        public
-        override
-        nonReentrant
-        whenNotPaused
-        returns (uint256 shares)
+        public override nonReentrant whenNotPaused returns (uint256)
     {
-        shares = super.deposit(assets, receiver);
+        return super.deposit(assets, receiver);
     }
 
     function mint(uint256 shares, address receiver)
-        public
-        override
-        nonReentrant
-        whenNotPaused
-        returns (uint256 assets)
+        public override nonReentrant whenNotPaused returns (uint256)
     {
-        assets = super.mint(shares, receiver);
+        return super.mint(shares, receiver);
     }
 
-    function withdraw(uint256 assets, address receiver, address owner)
-        public
-        override
-        nonReentrant
-        returns (uint256 shares)
+    function withdraw(uint256 assets, address receiver, address _owner)
+        public override nonReentrant returns (uint256)
     {
         _ensureLocalLiquidity(assets);
-        shares = super.withdraw(assets, receiver, owner);
+        return super.withdraw(assets, receiver, _owner);
     }
 
-    /**
-     * @dev previewRedeem is evaluated before the recall so the liquidity check
-     *      matches the exact amount super.redeem will transfer.
-     */
-    function redeem(uint256 shares, address receiver, address owner)
-        public
-        override
-        nonReentrant
-        returns (uint256 assets)
+    /// @dev previewRedeem is evaluated before the recall so the liquidity check is exact.
+    function redeem(uint256 shares, address receiver, address _owner)
+        public override nonReentrant returns (uint256)
     {
         _ensureLocalLiquidity(previewRedeem(shares));
-        assets = super.redeem(shares, receiver, owner);
+        return super.redeem(shares, receiver, _owner);
     }
 
     // =========================================================================
     // Internal Helpers
     // =========================================================================
 
-    /**
-     * @notice Pull enough assets from Morpho so this contract holds at least `assets` locally.
-     * @dev Pulls deficit+1 wei when headroom exists. This absorbs a 1-wei ERC4626 rounding
-     *      loss that can occur in Morpho's share-burn math, preventing an otherwise valid
-     *      maxRedeem check from reverting when a user redeems exactly 100% of liquidity.
-     */
+    /// @dev Ensures at least `assets` USDC are held locally, recalling from Morpho if needed.
+    ///      Pulls deficit+1 wei when headroom exists to absorb 1-wei ERC4626 rounding.
     function _ensureLocalLiquidity(uint256 assets) internal {
         uint256 local = IERC20(asset()).balanceOf(address(this));
         if (local >= assets) return;
 
         uint256 deficit = assets - local;
-        IERC4626 _morpho = morphoVault;
-        if (address(_morpho) == address(0)) revert InsufficientLiquidity(assets, local);
+        IERC4626 vault_ = morphoVault;
+        if (address(vault_) == address(0)) revert InsufficientLiquidity(assets, local);
 
-        uint256 available = _morpho.maxWithdraw(address(this));
+        uint256 available = vault_.maxWithdraw(address(this));
         if (deficit > available) revert InsufficientLiquidity(assets, local + available);
 
         uint256 toWithdraw = deficit < available ? deficit + 1 : deficit;
-        _morpho.withdraw(toWithdraw, address(this), address(this));
-        emit AssetsRecalled(address(_morpho), toWithdraw);
+        vault_.withdraw(toWithdraw, address(this), address(this));
+        emit AssetsRecalled(address(vault_), toWithdraw);
     }
 
-    /**
-     * @notice Total assets immediately withdrawable: local balance + Morpho maxWithdraw.
-     */
     function _availableLiquidity() internal view returns (uint256) {
-        uint256 local = IERC20(asset()).balanceOf(address(this));
-        IERC4626 _morpho = morphoVault;
-        uint256 fromMorpho = address(_morpho) != address(0)
-            ? _morpho.maxWithdraw(address(this))
+        IERC4626 vault_ = morphoVault;
+        uint256 fromVault = address(vault_) != address(0)
+            ? vault_.maxWithdraw(address(this))
             : 0;
-        return local + fromMorpho;
-    }
-
-    /**
-     * @notice Approve `vault` for exactly `assets` and deposit.
-     */
-    function _deployToMorpho(IERC4626 vault, uint256 assets) internal {
-        IERC20(asset()).forceApprove(address(vault), assets);
-        vault.deposit(assets, address(this));
-        emit AssetsDeployed(address(vault), assets);
+        return IERC20(asset()).balanceOf(address(this)) + fromVault;
     }
 }

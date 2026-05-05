@@ -6,29 +6,23 @@ const UMYOVaultABI = require('./UMYOVaultABI.json');
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
-const CHAIN_ID              = parseInt(process.env.CHAIN_ID, 10);
-const RPC_URL               = process.env.RPC_URL;
-const VAULT_ADDRESS         = process.env.CONTRACT_ADDRESS;
-const PRIVATE_KEY           = process.env.PRIVATE_KEY;
-const MORPHO_API_URL        = 'https://api.morpho.org/graphql';
+const REQUIRED_ENV = ['CHAIN_ID', 'RPC_URL', 'CONTRACT_ADDRESS', 'PRIVATE_KEY'];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) throw new Error(`Missing required env var: ${key}`);
+}
+
+const CHAIN_ID            = parseInt(process.env.CHAIN_ID, 10);
+const RPC_URL             = process.env.RPC_URL;
+const VAULT_ADDRESS       = process.env.CONTRACT_ADDRESS;
+const PRIVATE_KEY         = process.env.PRIVATE_KEY;
+const MORPHO_API_URL      = 'https://api.morpho.org/graphql';
 
 // Only rebalance if the best vault offers at least this much more APY (absolute, e.g. 0.5 = 0.5%)
-const MIN_APY_IMPROVEMENT   = parseFloat(process.env.MIN_APY_IMPROVEMENT ?? '0.5');
+const MIN_APY_IMPROVEMENT = parseFloat(process.env.MIN_APY_IMPROVEMENT ?? '0.5');
 
-// Slippage tolerance on the recall AND deploy steps (basis points, e.g. 50 = 0.5%)
-const SLIPPAGE_BPS          = parseInt(process.env.SLIPPAGE_BPS ?? '50', 10);
-
-// Minimal ABI for the Morpho ERC4626 vault (read-only calls)
+// Minimal ABI for a Morpho ERC4626 vault (read-only)
 const MORPHO_VAULT_ABI = [
   'function asset() view returns (address)',
-  'function maxWithdraw(address owner) view returns (uint256)',
-  'function previewDeposit(uint256 assets) view returns (uint256)',
-  'function balanceOf(address account) view returns (uint256)',
-];
-
-// Minimal ABI for the ERC20 underlying (idle balance check)
-const ERC20_ABI = [
-  'function balanceOf(address account) view returns (uint256)',
 ];
 
 // ─── Morpho API ─────────────────────────────────────────────────────────────
@@ -57,8 +51,12 @@ async function getVaultsSortedByApy() {
   const { data } = await axios.post(
     MORPHO_API_URL,
     { query },
-    { headers: { 'Content-Type': 'application/json' } }
+    { headers: { 'Content-Type': 'application/json' }, timeout: 10_000 }
   );
+
+  if (data.errors?.length) {
+    throw new Error(`Morpho API error: ${data.errors.map(e => e.message).join(', ')}`);
+  }
 
   const vaults = data.data.vaults.items.filter(
     v => v.dailyApys?.netApy !== undefined && v.dailyApys.netApy !== null
@@ -69,15 +67,6 @@ async function getVaultsSortedByApy() {
   return vaults.sort((a, b) => b.dailyApys.netApy - a.dailyApys.netApy);
 }
 
-// ─── Current vault APY ───────────────────────────────────────────────────────
-
-async function getCurrentVaultApy(currentVaultAddress, allVaults) {
-  const match = allVaults.find(
-    v => v.address.toLowerCase() === currentVaultAddress.toLowerCase()
-  );
-  return match ? match.dailyApys.netApy : null;
-}
-
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function optimizeVault() {
@@ -86,29 +75,32 @@ async function optimizeVault() {
   const vault    = new ethers.Contract(VAULT_ADDRESS, UMYOVaultABI, signer);
 
   // ── Step 1: current state ──────────────────────────────────────────────────
-  const currentVaultAddress = await vault.morphoVault();
-  const isVaultSet = currentVaultAddress !== ethers.ZeroAddress;
-  console.log(`Vault:         ${VAULT_ADDRESS}`);
-  console.log(`Current Morpho: ${isVaultSet ? currentVaultAddress : '(none)'}`);
+  const currentMarket = await vault.morphoVault();
+  const isMarketSet   = currentMarket !== ethers.ZeroAddress;
+  console.log(`Vault:          ${VAULT_ADDRESS}`);
+  console.log(`Current market: ${isMarketSet ? currentMarket : '(none)'}`);
 
-  // ── Step 2: find best available vault ─────────────────────────────────────
+  // ── Step 2: find best available vault via Morpho API ──────────────────────
   const sortedVaults = await getVaultsSortedByApy();
   const bestVault    = sortedVaults[0];
-  console.log(`Best vault:    ${bestVault.address} — ${bestVault.name}`);
-  console.log(`Best APY:      ${(bestVault.dailyApys.netApy * 100).toFixed(2)}%`);
+  console.log(`Best vault:     ${bestVault.address} — ${bestVault.name}`);
+  console.log(`Best APY:       ${(bestVault.dailyApys.netApy * 100).toFixed(2)}%`);
 
   // ── Step 3: check if improvement justifies rebalance ──────────────────────
-  if (isVaultSet && currentVaultAddress.toLowerCase() === bestVault.address.toLowerCase()) {
+  if (isMarketSet && currentMarket.toLowerCase() === bestVault.address.toLowerCase()) {
     console.log('Already using the best vault. No action needed.');
     return;
   }
 
-  if (isVaultSet) {
-    const currentApy = await getCurrentVaultApy(currentVaultAddress, sortedVaults);
-    if (currentApy !== null) {
+  if (isMarketSet) {
+    const currentVaultData = sortedVaults.find(
+      v => v.address.toLowerCase() === currentMarket.toLowerCase()
+    );
+    if (currentVaultData) {
+      const currentApy  = currentVaultData.dailyApys.netApy;
       const improvement = (bestVault.dailyApys.netApy - currentApy) * 100;
-      console.log(`Current APY:   ${(currentApy * 100).toFixed(2)}%`);
-      console.log(`APY delta:     +${improvement.toFixed(2)}%`);
+      console.log(`Current APY:    ${(currentApy * 100).toFixed(2)}%`);
+      console.log(`APY delta:      +${improvement.toFixed(2)}%`);
       if (improvement < MIN_APY_IMPROVEMENT) {
         console.log(`Improvement (${improvement.toFixed(2)}%) below threshold (${MIN_APY_IMPROVEMENT}%). Skipping.`);
         return;
@@ -117,21 +109,20 @@ async function optimizeVault() {
   }
 
   // ── Step 4: on-chain safety checks ────────────────────────────────────────
-  // Cross-check the API-returned address against the on-chain approved list.
-  // This prevents a compromised or MITM'd API response from directing funds
-  // to an arbitrary contract — the owner must explicitly whitelist the vault.
-  const isApproved = await vault.approvedVaults(bestVault.address);
-  if (!isApproved) {
+  // Cross-check the API address against the on-chain whitelist.
+  // A compromised/MITM'd API cannot route funds to an arbitrary contract —
+  // the owner must explicitly call allowMarket() first.
+  const isAllowed = await vault.allowedVaults(bestVault.address);
+  if (!isAllowed) {
     throw new Error(
-      `Vault ${bestVault.address} is not in the on-chain approved list. ` +
-      `The owner must call approveVault(${bestVault.address}) first. Aborting.`
+      `Vault ${bestVault.address} is not whitelisted on-chain. ` +
+      `The owner must call allowVault(${bestVault.address}, true) first. Aborting.`
     );
   }
 
-  // Verify underlying asset matches to guard against a malicious vault slipping
-  // through the API with a different token.
-  const newMorpho   = new ethers.Contract(bestVault.address, MORPHO_VAULT_ABI, provider);
-  const vaultAsset  = await vault.asset();
+  // Verify underlying asset matches (defence against malicious vault in API).
+  const newMorpho     = new ethers.Contract(bestVault.address, MORPHO_VAULT_ABI, provider);
+  const vaultAsset    = await vault.asset();
   const newVaultAsset = await newMorpho.asset();
   if (newVaultAsset.toLowerCase() !== vaultAsset.toLowerCase()) {
     throw new Error(
@@ -139,35 +130,9 @@ async function optimizeVault() {
     );
   }
 
-  // ── Step 5: compute slippage floors ───────────────────────────────────────
-  let minAssetsReceived = 0n;
-  let maxWithdraw = 0n;
-
-  if (isVaultSet) {
-    const currentMorpho = new ethers.Contract(currentVaultAddress, MORPHO_VAULT_ABI, provider);
-    maxWithdraw = await currentMorpho.maxWithdraw(VAULT_ADDRESS);
-    minAssetsReceived = maxWithdraw * BigInt(10_000 - SLIPPAGE_BPS) / 10_000n;
-    console.log(`Max withdraw:  ${ethers.formatUnits(maxWithdraw, 6)} USDC`);
-    console.log(`Min accepted:  ${ethers.formatUnits(minAssetsReceived, 6)} USDC`);
-  }
-
-  // Compute minSharesOut for the deploy step: query how many shares the new vault
-  // would give for the total USDC to be deployed (recalled + idle), then apply
-  // slippage tolerance.
-  const underlying  = new ethers.Contract(vaultAsset, ERC20_ABI, provider);
-  const idleAssets  = await underlying.balanceOf(VAULT_ADDRESS);
-  const totalToDeploy = maxWithdraw + idleAssets;
-  let minSharesOut  = 0n;
-  if (totalToDeploy > 0n) {
-    const expectedShares = await newMorpho.previewDeposit(totalToDeploy);
-    minSharesOut = expectedShares * BigInt(10_000 - SLIPPAGE_BPS) / 10_000n;
-    console.log(`Expected shares: ${expectedShares.toString()}`);
-    console.log(`Min shares out:  ${minSharesOut.toString()}`);
-  }
-
-  // ── Step 6: rebalance (single atomic transaction) ─────────────────────────
+  // ── Step 5: rebalance ─────────────────────────────────────────────────────
   console.log(`\nRebalancing → ${bestVault.name} (${bestVault.address})...`);
-  const tx = await vault.rebalance(bestVault.address, minAssetsReceived, minSharesOut);
+  const tx      = await vault.rebalance(bestVault.address);
   const receipt = await tx.wait();
   console.log(`Done. tx: ${receipt.hash}`);
 
@@ -177,9 +142,8 @@ async function optimizeVault() {
     .find(e => e?.name === 'Rebalanced');
 
   if (rebalancedEvent) {
-    const { assetsWithdrawn, assetsDeployed } = rebalancedEvent.args;
-    console.log(`Withdrawn:     ${ethers.formatUnits(assetsWithdrawn, 6)} USDC`);
-    console.log(`Deployed:      ${ethers.formatUnits(assetsDeployed, 6)} USDC`);
+    const { assetsDeployed } = rebalancedEvent.args;
+    console.log(`Deployed: ${ethers.formatUnits(assetsDeployed, 6)} USDC`);
   }
 }
 

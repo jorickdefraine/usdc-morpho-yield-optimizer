@@ -1,15 +1,13 @@
 name: Launch Rebalancer
 on:
   schedule:
-    # Runs at 00:00 UTC every day
-    - cron: '0 0 * * *'
-  # Allows you to manually trigger the workflow
+    - cron: '0 */12 * * *'
   workflow_dispatch:
 
 jobs:
   optimize:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -24,9 +22,11 @@ jobs:
 
     - name: Load environment variables
       run: |
+        echo "CHAIN_ID=8453" >> .env
         echo "RPC_URL=${{ secrets.RPC_URL }}" >> .env
         echo "CONTRACT_ADDRESS=${{ secrets.CONTRACT_ADDRESS }}" >> .env
         echo "PRIVATE_KEY=${{ secrets.PRIVATE_KEY }}" >> .env
+        echo "MIN_APY_IMPROVEMENT=${{ vars.MIN_APY_IMPROVEMENT || '0.5' }}" >> .env
 
-    - name: Run optimization script
+    - name: Run rebalancer
       run: node scripts/rebalancer.js
