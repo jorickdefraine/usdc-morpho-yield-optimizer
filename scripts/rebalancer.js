@@ -43,8 +43,8 @@ async function getVaultsSortedByApy() {
           symbol
           name
           state {
-            avgNetApyExcludingRewards(lookback: ONE_DAY)
-            avgNetApy(lookback: ONE_DAY)
+            state.avgNetApyExcludingRewards(lookback: ONE_DAY)
+            state.avgNetApy(lookback: ONE_DAY)
           }
         }
       }
@@ -62,12 +62,12 @@ async function getVaultsSortedByApy() {
   }
 
   const vaults = data.data.vaults.items.filter(
-    v => v.avgNetApy !== undefined && v.avgNetApy !== null
+    v => v.state.avgNetApy !== undefined && v.state.avgNetApy !== null
   );
 
   if (vaults.length === 0) throw new Error('No valid Morpho vaults found');
 
-  return vaults.sort((a, b) => b.avgNetApy - a.avgNetApy);
+  return vaults.sort((a, b) => b.state.avgNetApy - a.state.avgNetApy);
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ async function optimizeVault() {
   const sortedVaults = await getVaultsSortedByApy();
   const bestVault    = sortedVaults[0];
   console.log(`Best vault:     ${bestVault.address} — ${bestVault.name}`);
-  console.log(`Best APY:       ${(bestVault.avgNetApy * 100).toFixed(2)}%`);
+  console.log(`Best APY:       ${(bestVault.state.avgNetApy * 100).toFixed(2)}%`);
 
   // ── Step 3: check if improvement justifies rebalance ──────────────────────
   if (isMarketSet && currentMarket.toLowerCase() === bestVault.address.toLowerCase()) {
@@ -100,8 +100,8 @@ async function optimizeVault() {
       v => v.address.toLowerCase() === currentMarket.toLowerCase()
     );
     if (currentVaultData) {
-      const currentApy  = currentVaultData.avgNetApy;
-      const improvement = (bestVault.avgNetApy - currentApy) * 100;
+      const currentApy  = currentVaultData.state.avgNetApy;
+      const improvement = (bestVault.state.avgNetApy - currentApy) * 100;
       console.log(`Current APY:    ${(currentApy * 100).toFixed(2)}%`);
       console.log(`APY delta:      +${improvement.toFixed(2)}%`);
       if (improvement < MIN_APY_IMPROVEMENT) {
