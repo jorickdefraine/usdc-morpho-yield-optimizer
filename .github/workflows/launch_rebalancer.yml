@@ -1,7 +1,7 @@
 name: Launch Rebalancer
 on:
   schedule:
-    - cron: '0 */1 * * *'
+    - cron: '23 */3 * * *'
   workflow_dispatch:
 
 jobs:
