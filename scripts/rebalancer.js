@@ -18,7 +18,7 @@ const PRIVATE_KEY         = process.env.PRIVATE_KEY;
 const MORPHO_API_URL      = 'https://api.morpho.org/graphql';
 
 // Only rebalance if the best vault offers at least this much more APY (absolute, e.g. 0.5 = 0.5%)
-const MIN_APY_IMPROVEMENT = parseFloat(process.env.MIN_APY_IMPROVEMENT ?? '0.5');
+const MIN_APY_IMPROVEMENT = 0.1 //parseFloat(process.env.MIN_APY_IMPROVEMENT ?? '0.5');
 
 // Minimal ABI for a Morpho ERC4626 vault (read-only)
 const MORPHO_VAULT_ABI = [
