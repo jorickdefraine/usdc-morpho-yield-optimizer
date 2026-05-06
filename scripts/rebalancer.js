@@ -43,8 +43,8 @@ async function getVaultsSortedByApy() {
           symbol
           name
           state {
-            state.avgNetApyExcludingRewards(lookback: ONE_DAY)
-            state.avgNetApy(lookback: ONE_DAY)
+            avgNetApyExcludingRewards(lookback: ONE_DAY)
+            avgNetApy(lookback: ONE_DAY)
           }
         }
       }
