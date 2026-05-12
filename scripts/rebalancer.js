@@ -73,7 +73,10 @@ async function getVaultsSortedByApy() {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function optimizeVault() {
-  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const provider = new ethers.JsonRpcProvider(RPC_URL, undefined, {
+    timeout: 30000,
+    staticNetwork: true,
+  });
   const signer   = new ethers.Wallet(PRIVATE_KEY, provider);
   const vault    = new ethers.Contract(VAULT_ADDRESS, UMYOVaultABI, signer);
 
